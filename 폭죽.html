@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>오디오 비트 동기화 폭죽놀이 + 조명 효과 (20종 + 효과음)</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: black;
+      height: 100%;
+    }
+    #canvas {
+      display: block;
+      background: black;
+    }
+    /* 시작 전 안내 메시지 */
+    #startMessage {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-family: sans-serif;
+      font-size: 24px;
+      cursor: pointer;
+      z-index: 2;
+    }
+  </style>
+</head>
+<body>
+  <!-- 시작 전 안내 메시지 -->
+  <div id="startMessage">여기를 클릭하세요 – 폭죽놀이 시작!</div>
+  
+  <!-- 폭죽 및 조명 효과를 위한 캔버스 -->
+  <canvas id="canvas"></canvas>
+  
+  <!-- 제공된 MP3 오디오 파일 -->
+  <audio id="audio" 
+    src="https://my-data-woad.vercel.app/202452-%EC%97%90%EB%B2%84%EB%9E%9C%EB%93%9C-%EB%B6%88%EA%BD%83%EB%86%80%EC%9D%B4-%EC%A3%BC%ED%81%AC%EB%B0%95%EC%8A%A4lets-dance.mp3"
+    preload="auto">
+  </audio>
+  
+  <!-- 폭죽 효과음: 로켓 폭발 시 재생 (사용자가 직접 준비한 파일로 교체하세요) -->
+  <audio id="fireworkSound" src="firework_effect.mp3" preload="auto"></audio>
+  
+  <script>
+    // 캔버스 및 컨텍스트 설정
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    
+    // 전역 배열: 로켓(폭죽), 입자, 조명 효과 저장
+    let rockets = [];
+    let particles = [];
+    let lightBeams = [];
+    
+    // Web Audio API 설정
+    const audio = document.getElementById("audio");
+    audio.crossOrigin = "anonymous";
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioContext.createMediaElementSource(audio);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    analyser.connect(audioContext.destination);
+    
+    // 폭죽 활성화 관련 변수
+    let startThreshold = 180;    // 저주파 평균이 이 값 이상이면 폭죽 효과 활성
+    let stopThreshold  = 150;     // 이 값 이하이면 폭죽 효과 중단
+    let fireworksActive = false; // 폭죽 효과 활성/비활성 상태
+    let lastBeatTime = 0;
+    const beatCooldown = 300;    // 최소 300ms 간격으로 새 효과 생성
+    
+    // "음악이 아닌 소리" 판정을 위한 고주파 대비 저주파 임계치
+    const highFreqRatioThreshold = 1.5;
+    
+    // 웅장한 폭죽 판단: 저주파가 매우 강하면 (예, 250 이상) 웅장한 폭죽(타입20)으로 처리
+    const epicThreshold = 250;
+    
+    // 시간 계산용 변수 (조명 업데이트 등)
+    let lastTime = performance.now();
+    // 전역 변수로 현재 저주파 평균을 저장 (폭죽 폭발 시 웅장한 효과 결정에 사용)
+    let currentLowAvg = 0;
+    
+    // ─────────────────────────────
+    // Particle 클래스: 폭죽 폭발 시 생성되는 입자
+    class Particle {
+      constructor(x, y, color, angle, speed, radius = 2, flame = false) {
+        this.x = x;
+        this.y = y;
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.alpha = 1;
+        this.color = color;
+        this.radius = radius;
+        this.flame = flame;
+        this.friction = 0.98;
+        this.gravity = 0.05;
+      }
+      update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += this.gravity;
+        this.vx *= this.friction;
+        this.vy *= this.friction;
+        this.alpha -= 0.01;
+      }
+      draw(ctx) {
+        ctx.save();
+        ctx.globalAlpha = this.alpha;
+        if (this.flame) {
+          const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius * 2);
+          gradient.addColorStop(0, this.color);
+          gradient.addColorStop(1, "black");
+          ctx.fillStyle = gradient;
+        } else {
+          ctx.fillStyle = this.color;
+        }
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    
+    // ─────────────────────────────
+    // Rocket 클래스: 화면 하단에서 위로 발사 후 폭발하는 로켓 (폭죽)
+    class Rocket {
+      constructor(x) {
+        this.x = x;
+        this.y = canvas.height;
+        this.vy = Math.random() * 2 + 6;
+        // 폭발 고도: 화면 높이의 30~50% 근처
+        this.explosionY = Math.random() * (canvas.height * 0.2) + canvas.height * 0.3;
+        this.exploded = false;
+        this.color = `hsl(${Math.floor(Math.random() * 360)}, 100%, 50%)`;
+      }
+      update() {
+        if (!this.exploded) {
+          this.vy += 0.1;
+          this.y -= this.vy;
+          if (this.y <= this.explosionY) {
+            this.explode();
+          }
+        }
+      }
+      explode() {
+        this.exploded = true;
+        // 폭발 타입 선택:
+        // 현재 저주파 에너지(currentLowAvg)가 매우 크면 웅장한 폭죽(타입20) 지정,
+        // 아니면 1~20 사이에서 랜덤값.
+        let explosionType =
+          (currentLowAvg > epicThreshold) ? 20 : Math.floor(Math.random() * 20) + 1;
+        // 폭죽 효과음 재생 (폭발 타입에 따라 볼륨 조절)
+        playFireworkSound(explosionType);
+        triggerExplosion(this.x, this.y, explosionType, this.color);
+      }
+      draw(ctx) {
+        if (!this.exploded) {
+          ctx.save();
+          ctx.fillStyle = this.color;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    }
+    
+    // ─────────────────────────────
+    // LightBeam 클래스: 아래에서 위로 쏘이는 삼각형 조명 효과 (비트에 맞춰 깜빡임)
+    class LightBeam {
+      constructor(x) {
+        this.x = x;
+        this.y = canvas.height;
+        this.width = 40;
+        this.height = 150;
+        this.speed = 8;
+        this.age = 0;
+        this.lifetime = 300;
+        this.opacity = 1;
+      }
+      update(deltaTime) {
+        this.y -= this.speed * (deltaTime / 16);
+        this.age += deltaTime;
+        this.opacity = Math.max(0, 1 - this.age / this.lifetime) * (0.7 + 0.3 * Math.random());
+      }
+      draw(ctx) {
+        ctx.save();
+        ctx.globalAlpha = this.opacity;
+        ctx.fillStyle = "yellow";
+        ctx.beginPath();
+        ctx.moveTo(this.x - this.width / 2, this.y);
+        ctx.lineTo(this.x + this.width / 2, this.y);
+        ctx.lineTo(this.x, this.y - this.height);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    
+    // ─────────────────────────────
+    // playFireworkSound: 폭죽 효과음 재생 함수 (폭발 타입에 따라 볼륨 조절)
+    function playFireworkSound(explosionType) {
+      const fwAudio = document.getElementById("fireworkSound");
+      if (fwAudio) {
+        // 웅장한 폭죽(타입20)이면 볼륨을 1로, 그 외는 0.6 정도로 설정
+        fwAudio.volume = (explosionType === 20) ? 1.0 : 0.6;
+        fwAudio.currentTime = 0;
+        fwAudio.play().catch(console.error);
+      }
+    }
+    
+    // ─────────────────────────────
+    // triggerExplosion: 폭발 위치, 폭발 타입, 기본 색상을 받아 다양한 폭죽 효과 입자를 생성
+    function triggerExplosion(x, y, type, baseColor) {
+      switch(type) {
+        case 1:
+          for (let i = 0; i < 100; i++) {
+            const angle = Math.random() * 2 * Math.PI;
+            const speed = Math.random() * 3 + 2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+        case 2:
+          {
+            const count2 = 80;
+            for (let i = 0; i < count2; i++) {
+              const angle = (i / count2) * 2 * Math.PI;
+              const speed = 4;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }
+          break;
+        case 3:
+          {
+            const count3 = 90;
+            const baseAngle = Math.random() * 2 * Math.PI;
+            for (let i = 0; i < count3; i++) {
+              const angle = baseAngle + i * 0.15;
+              const speed = Math.random() * 2 + 3;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }
+          break;
+        case 4:
+          for (let i = 0; i < 110; i++) {
+            const angle = Math.random() * 2 * Math.PI;
+            const speed = Math.random() * 4 + 2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+        case 5:
+          for (let i = 0; i < 100; i++) {
+            const angle = Math.random() * 2 * Math.PI;
+            const speed = Math.random() * 3 + 2;
+            const altColor = (i % 2 === 0) ? baseColor : `hsl(${Math.floor(Math.random() * 360)}, 100%, 50%)`;
+            particles.push(new Particle(x, y, altColor, angle, speed, 2, true));
+          }
+          break;
+        case 6:
+          {
+            const count6 = 80;
+            for (let i = 0; i < count6; i++) {
+              const angle = (i / count6) * 2 * Math.PI + (Math.random() - 0.5)*0.2;
+              const speed = 4;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }
+          break;
+        case 7:
+          for (let i = 0; i < 100; i++) {
+            const angle = (Math.random() * Math.PI/2) - Math.PI/4;
+            const speed = Math.random() * 3 + 3;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+        case 8:
+          {
+            const confettiColors = ["#ff595e", "#ffca3a", "#8ac926", "#1982c4", "#6a4c93"];
+            for (let i = 0; i < 120; i++) {
+              const angle = Math.random() * 2 * Math.PI;
+              const speed = Math.random() * 3 + 2;
+              const color = confettiColors[Math.floor(Math.random() * confettiColors.length)];
+              particles.push(new Particle(x, y, color, angle, speed, 2, true));
+            }
+          }
+          break;
+        case 9:
+          for (let i = 0; i < 100; i++) {
+            const t = Math.random() * Math.PI * 2;
+            const r = 10;
+            const offsetX = 16 * Math.pow(Math.sin(t), 3);
+            const offsetY = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+            let angle = Math.atan2(offsetY, offsetX) + (Math.random()-0.5)*0.2;
+            const speed = (Math.random()*0.5+1)*r;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+        case 10:
+          for (let i = 0; i < 50; i++) {
+            const speed = Math.random()*3+3;
+            particles.push(new Particle(x, y, baseColor, 0, speed, 2, true));
+            particles.push(new Particle(x, y, baseColor, Math.PI, speed, 2, true));
+            particles.push(new Particle(x, y, baseColor, Math.PI/2, speed, 2, true));
+            particles.push(new Particle(x, y, baseColor, 3*Math.PI/2, speed, 2, true));
+          }
+          break;
+        case 11:
+          for (let i = 0; i < 100; i++) {
+            const angle = Math.random()*2*Math.PI + Math.sin(i)*0.5;
+            const speed = Math.random()*3+2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+        case 12:
+          for (let i = 0; i < 100; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = (i % 2 === 0) ? Math.random()*3+3 : Math.random()*2+2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+        case 13:
+          for (let i = 0; i < 150; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = Math.random()*2+2;
+            particles.push(new Particle(x, y, "white", angle, speed, 1, false));
+          }
+          break;
+        case 14:
+          {
+            const count14 = 120;
+            const baseAngle14 = Math.random()*2*Math.PI;
+            for (let i = 0; i < count14; i++) {
+              const angle = baseAngle14 + i*(Math.PI/15);
+              const speed = Math.random()*2+3;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }
+          break;
+        case 15:
+          for (let i = 0; i < 60; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = Math.random()*3+3;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          setTimeout(() => {
+            for (let i = 0; i < 40; i++) {
+              const angle = Math.random()*2*Math.PI;
+              const speed = Math.random()*2+2;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }, 200);
+          break;
+        case 16:
+          for (let i = 0; i < 50; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = Math.random()*3+2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          {
+            const count16 = 60;
+            for (let i = 0; i < count16; i++) {
+              const angle = (i/count16)*2*Math.PI;
+              const speed = 4;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }
+          break;
+        case 17:
+          {
+            const count17 = 100;
+            const baseAngle17 = Math.random()*2*Math.PI;
+            for (let i = 0; i < count17; i++) {
+              const angle = baseAngle17 + i*0.2;
+              const speed = (i/100)*5+2;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }
+          break;
+        case 18:
+          for (let i = 0; i < 70; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = Math.random()*3+2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          setTimeout(() => {
+            for (let i = 0; i < 50; i++) {
+              const angle = Math.random()*2*Math.PI;
+              const speed = Math.random()*2+2;
+              particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+            }
+          }, 200);
+          break;
+        case 19:
+          for (let i = 0; i < 200; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = Math.random()*4+2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+        case 20:
+          // 20. Epic Explosion – 웅장하고 신나는 폭죽: 입자 수를 대폭 늘리고, 입자 크기도 좀 키움
+          for (let i = 0; i < 300; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = Math.random()*5+3;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 3, true));
+          }
+          break;
+        default:
+          for (let i = 0; i < 100; i++) {
+            const angle = Math.random()*2*Math.PI;
+            const speed = Math.random()*3+2;
+            particles.push(new Particle(x, y, baseColor, angle, speed, 2, true));
+          }
+          break;
+      }
+    }
+    
+    // ─────────────────────────────
+    // 애니메이션 루프
+    function animate() {
+      const now = performance.now();
+      const deltaTime = now - lastTime;
+      lastTime = now;
+      
+      // 배경 잔상 효과
+      ctx.fillStyle = "rgba(0, 0, 0, 0.2)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // 로켓 업데이트 및 그리기
+      for (let i = rockets.length - 1; i >= 0; i--) {
+        rockets[i].update();
+        rockets[i].draw(ctx);
+        if (rockets[i].exploded) {
+          rockets.splice(i, 1);
+        }
+      }
+      
+      // 입자 업데이트 및 그리기
+      for (let i = particles.length - 1; i >= 0; i--) {
+        particles[i].update();
+        particles[i].draw(ctx);
+        if (particles[i].alpha <= 0) {
+          particles.splice(i, 1);
+        }
+      }
+      
+      // 조명(LightBeam) 업데이트 및 그리기
+      for (let i = lightBeams.length - 1; i >= 0; i--) {
+        lightBeams[i].update(deltaTime);
+        lightBeams[i].draw(ctx);
+        if (lightBeams[i].age >= lightBeams[i].lifetime) {
+          lightBeams.splice(i, 1);
+        }
+      }
+      
+      // 주파수 데이터 분석 – 저주파(0~9번) 평균
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(dataArray);
+      let lowFreqSum = 0;
+      for (let i = 0; i < 10; i++) {
+        lowFreqSum += dataArray[i];
+      }
+      const lowAvg = lowFreqSum / 10;
+      currentLowAvg = lowAvg; // 전역에 저장하여 Rocket.explode()에서 사용
+      
+      // 고주파 에너지(50번 이후) 평균 계산 → 음악 이외의 소리 판정
+      let highFreqSum = 0;
+      for (let i = 50; i < analyser.frequencyBinCount; i++) {
+        highFreqSum += dataArray[i];
+      }
+      const highAvg = highFreqSum / (analyser.frequencyBinCount - 50);
+      const ratio = highAvg / (lowAvg + 1); // 0 나누기 방지
+      
+      // 저주파 에너지를 기준으로 폭죽 활성 여부 결정
+      if (lowAvg > startThreshold) {
+        fireworksActive = true;
+      } else if (lowAvg < stopThreshold) {
+        fireworksActive = false;
+      }
+      
+      // 고주파 비율이 높으면 (음악이 아닌 소리로 판단) 폭죽 중단 및 효과 제거
+      if (ratio > highFreqRatioThreshold) {
+        fireworksActive = false;
+        rockets = [];
+        lightBeams = [];
+      }
+      
+      // 폭죽 활성 상태에서 (쿨다운 적용) 새 로켓과 조명 생성
+      if (fireworksActive && Date.now() - lastBeatTime > beatCooldown) {
+        const rocketX = Math.random() * canvas.width;
+        rockets.push(new Rocket(rocketX));
+        lightBeams.push(new LightBeam(rocketX));
+        lastBeatTime = Date.now();
+      }
+      
+      requestAnimationFrame(animate);
+    }
+    animate();
+    
+    // 시작 메시지 클릭 시 AudioContext 재개 후 오디오 재생
+    const startMessage = document.getElementById("startMessage");
+    startMessage.addEventListener("click", function () {
+      startMessage.style.display = "none";
+      if (audioContext.state === "suspended") {
+        audioContext.resume().then(() => {
+          audio.play().catch(console.error);
+        }).catch(console.error);
+      } else {
+        audio.play().catch(console.error);
+      }
+    });
+    
+    // 창 크기 변경 시 캔버스 업데이트
+    window.addEventListener("resize", function () {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    });
+  </script>
+</body>
+</html>
